@@ -8,7 +8,7 @@ import (
 	"github.com/Rican7/retry"
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
-	"github.com/go-redis/redis"
+	"github.com/go-redis/redis/v8"
 	"github.com/pkg/errors"
 	"github.com/renstrom/shortuuid"
 )
@@ -37,6 +37,7 @@ const (
 )
 
 type Subscriber struct {
+	ctx context.Context
 	config SubscriberConfig
 	rc     redis.UniversalClient
 
@@ -50,7 +51,7 @@ type Subscriber struct {
 }
 
 // NewSubscriber creates a new redis stream Subscriber.
-func NewSubscriber(config SubscriberConfig, rc redis.UniversalClient, unmarshaler Unmarshaler, logger watermill.LoggerAdapter) (message.Subscriber, error) {
+func NewSubscriber(ctx context.Context, config SubscriberConfig, rc redis.UniversalClient, unmarshaler Unmarshaler, logger watermill.LoggerAdapter) (message.Subscriber, error) {
 	if logger == nil {
 		logger = &watermill.NopLogger{}
 	}
@@ -58,6 +59,7 @@ func NewSubscriber(config SubscriberConfig, rc redis.UniversalClient, unmarshale
 		return nil, err
 	}
 	return &Subscriber{
+		ctx: ctx,
 		config:       config,
 		rc:           rc,
 		unmarshaller: unmarshaler,
@@ -162,7 +164,7 @@ func (s *Subscriber) consumeMessages(ctx context.Context, topic string, output c
 	}()
 
 	// create consumer group
-	if _, err := s.rc.XGroupCreateMkStream(topic, s.config.ConsumerGroup, oldestId).Result(); err != nil && err.Error() != redisBusyGroup {
+	if _, err := s.rc.XGroupCreateMkStream(s.ctx, topic, s.config.ConsumerGroup, oldestId).Result(); err != nil && err.Error() != redisBusyGroup {
 		return nil, err
 	}
 
@@ -243,7 +245,9 @@ func (s *Subscriber) read(ctx context.Context, stream string, readChannel chan<-
 		case <-ctx.Done():
 			return
 		default:
-			xss, err = s.rc.XReadGroup(&redis.XReadGroupArgs{
+			xss, err = s.rc.XReadGroup(
+				s.ctx,
+				&redis.XReadGroupArgs{
 				Group:    s.config.ConsumerGroup,
 				Consumer: s.config.Consumer,
 				Streams:  streams,
@@ -367,7 +371,7 @@ OUTER_LOOP:
 		case <-tick.C:
 		case <-initCh:
 		}
-		xps, err = s.rc.XPendingExt(&redis.XPendingExtArgs{
+		xps, err = s.rc.XPendingExt(s.ctx, &redis.XPendingExtArgs{
 			Stream: stream,
 			Group:  s.config.ConsumerGroup,
 			Start:  start,
@@ -386,14 +390,15 @@ OUTER_LOOP:
 			if maxIdleTime < xp.Idle {
 				maxIdleTime = xp.Idle
 			}
+
 			if xp.Idle >= s.config.MaxIdleTime {
 				// claim this
-				xm, err = s.rc.XClaim(&redis.XClaimArgs{
+				xm, err = s.rc.XClaim(s.ctx, &redis.XClaimArgs{
 					Stream:   stream,
 					Group:    s.config.ConsumerGroup,
 					Consumer: s.config.Consumer,
 					MinIdle:  s.config.MaxIdleTime,
-					Messages: []string{xp.Id},
+					Messages: []string{xp.ID},
 				}).Result()
 				if err != nil {
 					s.logger.Error(
@@ -502,12 +507,12 @@ ResendLoop:
 		case <-msg.Acked():
 			// deadly retry ack
 			p := h.rc.Pipeline()
-			p.XAck(stream, h.consumerGroup, xm.ID)
+			p.XAck(ctx, stream, h.consumerGroup, xm.ID)
 			if h.del {
-				p.XDel(stream, xm.ID)
+				p.XDel(ctx, stream, xm.ID)
 			}
 			err := retry.Retry(func(attempt uint) error {
-				_, err := p.Exec()
+				_, err := p.Exec(ctx)
 				return err
 			}, func(attempt uint) bool {
 				if attempt != 0 {

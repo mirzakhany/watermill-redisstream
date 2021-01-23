@@ -9,7 +9,7 @@ import (
 	"github.com/ThreeDotsLabs/watermill"
 	"github.com/ThreeDotsLabs/watermill/message"
 	"github.com/ThreeDotsLabs/watermill/pubsub/tests"
-	"github.com/go-redis/redis"
+	"github.com/go-redis/redis/v8"
 	"github.com/pkg/errors"
 	"github.com/renstrom/shortuuid"
 	"github.com/stretchr/testify/require"
@@ -19,7 +19,7 @@ var (
 	client redis.UniversalClient
 )
 
-func redisClient() (redis.UniversalClient, error) {
+func redisClient(ctx context.Context) (redis.UniversalClient, error) {
 	if client == nil {
 		client = redis.NewClient(&redis.Options{
 			Addr:         "127.0.0.1:6380",
@@ -28,7 +28,7 @@ func redisClient() (redis.UniversalClient, error) {
 			WriteTimeout: 10 * time.Second,
 			MinIdleConns: 10,
 		})
-		err := client.Ping().Err()
+		err := client.Ping(ctx).Err()
 		if err != nil {
 			return nil, errors.Wrap(err, "redis simple connect fail")
 		}
@@ -39,13 +39,14 @@ func redisClient() (redis.UniversalClient, error) {
 func newPubSub(t *testing.T, marshaler MarshalerUnmarshaler, subConfig *SubscriberConfig) (message.Publisher, message.Subscriber) {
 	logger := watermill.NewStdLogger(true, true)
 
-	rc, err := redisClient()
+	ctx := context.Background()
+	rc, err := redisClient(ctx)
 	require.NoError(t, err)
 
-	publisher, err := NewPublisher(rc, marshaler, logger)
+	publisher, err := NewPublisher(ctx, rc, marshaler, logger)
 	require.NoError(t, err)
 
-	subscriber, err := NewSubscriber(*subConfig, rc, marshaler, logger)
+	subscriber, err := NewSubscriber(ctx, *subConfig, rc, marshaler, logger)
 	require.NoError(t, err)
 
 	return publisher, subscriber
@@ -115,9 +116,10 @@ func TestPublishSubscribeWithDel(t *testing.T) {
 
 func TestSubscriber(t *testing.T) {
 	topic := "test-topic1"
-	rc, err := redisClient()
+	ctx := context.Background()
+	rc, err := redisClient(ctx)
 	require.NoError(t, err)
-	publisher, err := NewPublisher(rc, &DefaultMarshaler{}, watermill.NewStdLogger(false, false))
+	publisher, err := NewPublisher(ctx, rc, &DefaultMarshaler{}, watermill.NewStdLogger(false, false))
 	require.NoError(t, err)
 
 	for i := 0; i < 50; i++ {
@@ -126,6 +128,7 @@ func TestSubscriber(t *testing.T) {
 	require.NoError(t, publisher.Close())
 
 	subscriber, err := NewSubscriber(
+		ctx,
 		SubscriberConfig{
 			Consumer:        "consumer1",
 			ConsumerGroup:   "test-consumer-group",
